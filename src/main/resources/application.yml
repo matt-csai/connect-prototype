@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: connect-prototype
+  # Schema comes only from Flyway migrations in db/migration (Flyway runs at startup by default).
+  # There is no JPA, so there is no auto-DDL.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/connect}
+    username: ${DB_USERNAME:connect}
+    # No default: if DB_PASSWORD isn't exported, startup fails naming the missing placeholder
+    # instead of a confusing Postgres authentication error.
+    password: ${DB_PASSWORD}
+
+# Secrets come only from the environment (exported from the git-ignored .env in Matt's terminal).
+# StripeConfig refuses to start unless these are a sk_test_ key and a whsec_ secret.
+stripe:
+  secret-key: ${STRIPE_SECRET_KEY:}
+  webhook-secret: ${STRIPE_WEBHOOK_SECRET:}

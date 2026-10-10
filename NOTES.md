@@ -101,3 +101,67 @@ Matt's call: fix fail-open, tighten the reviewer's guard, fix the false positive
 **Written down, not fixed (CLAUDE.md "Limits").** The hooks can still be evaded by globs, escapes, variables and quoting (`cat .en?`, `stripe "config"`, `echo $STRIPE_SECRET_KEY`); the sandbox now covers file reads and the two env vars. Still open: commands excluded from the sandbox (`docker compose config` prints interpolated `.env` values, and it asks), and hooks themselves run outside the sandbox.
 
 **Watch items.** (1) Two edits in parallel can start two post-edit Maven runs on the same `target/`, which could cause flaky failures. Add a lock only if it happens. (2) Spotless rewriting the just-edited file, as noted above.
+
+## 2026-10-10: second guardrail commit (`8382f80`), and a process note
+
+Committed at Matt's direction ("then commit and move on to F1"), with 99/99 hook tests passing inside the sandbox and a secret scan of the staged diff. Process note: the round-2 fixes themselves weren't re-run through `payments-reviewer` and `/code-review` before this commit. The two review rounds covered the earlier versions of these files. The commit message's "Reviewed … (two rounds)" refers to that, not to a review of the final diff. The next review (before the F1 commit) can cover the hooks too, if Matt wants.
+
+## 2026-10-10: F1 decision point, Stripe now recommends Accounts v2
+
+Checked the current Stripe docs before planning F1 (ground rule 7). They differ from the brief:
+- Stripe presents **Accounts v2** (`POST /v2/core/accounts`) as the main connected-account API and describes v1 as "limited support". v2 uses `configuration.merchant` (capabilities `card_payments`, `stripe_balance.payouts`), `defaults.responsibilities` (`fees_collector`, `losses_collector`, `requirements_collector`) and `dashboard`, instead of v1's `controller`.
+- Onboarding status is per-capability `status` (`active`/`pending`/`restricted`/`unsupported`) plus `requirements.entries`. There's no v1-style `charges_enabled`/`payouts_enabled`/`details_submitted`.
+- Account changes arrive as **thin events** (`v2.core.account[configuration.merchant].capability_status_updated`, `v2.core.account.updated`). These carry only ids, are parsed with `StripeClient.parseEventNotification(...)`, and the code then fetches the current object. Checkout and payment events can stay v1 snapshot events. Stripe recommends thin events for new integrations.
+- v1 endpoints (Checkout Sessions with `transfer_data.destination`) accept v2 account ids.
+- The docs' create example sends `Stripe-Version: 2026-09-30.preview`. Whether v2 accounts need a preview version isn't confirmed yet.
+
+**Decision (Matt): v1 Accounts with controller properties**, as in the brief: platform pays Stripe fees, platform owns losses, Express dashboard, Stripe-hosted onboarding, `account.updated` snapshot events, `charges_enabled`/`payouts_enabled`/`details_submitted`. Reasons: lowest risk within the timebox, and most likely to match an existing Java codebase on the trial ticket. SUMMARY.md will say new integrations should use Accounts v2 with thin events, and what would change.
+
+## 2026-10-10: F1 plan approved, with Matt's changes
+
+- **Testcontainers stays outside the sandbox.** Matt runs `mvn verify` in his own terminal before each commit. Claude runs `mvn test` (unit tests) inside the sandbox. The Docker socket isn't opened to the sandbox. Reason: giving sandboxed commands the Docker socket effectively gives them the machine.
+- **The `return_url` endpoint refreshes from Stripe.** It calls `retrieveAccount` and updates the stored `charges_enabled`/`payouts_enabled`/`details_submitted`. `account.updated` (F3) stays the source of truth; this is a convenience refresh when the reseller comes back from onboarding.
+- **Insert-first account creation with idempotency-key repair**, approved, with a caveat Matt raised: Stripe keeps idempotency keys for 24 hours. A repair attempted after that window can create a **second connected account** for the same reseller. Acceptable for a prototype; it gets a code comment. **For SUMMARY.md's production section:** before creating, search for an existing account by `metadata.reseller_id`, or reconcile orphaned accounts, rather than relying on the idempotency key past 24 h. This is the kind of edge case to raise on a payments ticket.
+- **Also approved:** two commits for F1 (scaffold, then endpoints); `JdbcClient` over JPA, so transaction boundaries stay explicit for F3; and the F1a review also covers the guardrail hooks, which closes the review round they skipped.
+
+## 2026-10-10: F1a, Maven meets the sandbox
+
+- **Versions** (from `repo1.maven.org` metadata; the search.maven.org index was stale and topped out at Boot 3.5.3): Spring Boot **3.5.16** (newest 3.x; Boot 4.1 exists, but the brief says 3.x), stripe-java **34.0.0**, Spotless **3.10.4**. Flyway, Testcontainers and the Postgres driver come from Boot's managed versions.
+- **The sandbox blocked writes to `~/.m2`** (`Operation not permitted` on the cached parent POM). I deliberately didn't open `~/.m2` to the sandbox, because unsandboxed Maven runs (Matt's `mvn verify`, the post-edit hook) use that cache, so a sandboxed command could plant a jar that later runs outside the sandbox. Instead, `.mvn/maven.config` sets `-Dmaven.repo.local=.m2/repository`, a project-local cache (git-ignored). The working directory is already sandbox-writable and its code already runs in Matt's `mvn verify`, so this adds no new exposure.
+- **Network: the JVM ignores the sandbox proxy.** Maven failed with "Unknown host repo.maven.apache.org". The sandbox routes traffic through an authenticated local proxy set in `HTTPS_PROXY`, and Java and Maven don't read that variable.
+- **A guardrail fired on me, correctly.** Investigating the proxy, my `env | grep …` was blocked by `guard-bash.sh` ("env is not allowed"). I didn't work around it; I printed only named variables instead. **My mistake:** that printed the proxy URLs, which embed the sandbox proxy's per-session `user:password`. It's a localhost-only token for this session, not a Stripe key, but I should have masked the userinfo part. Lesson: treat any URL with userinfo as a secret, even "infrastructure" ones.
+- **Unsandboxed dependency download, denied.** I asked to run `mvn test` once outside the sandbox (no project Java code existed yet) to fill the cache, and the auto-mode classifier denied it as a safety bypass. I stopped there. Writing Java files would trigger the post-edit hook, which runs Maven **outside** the sandbox (hooks aren't sandboxed), so that would have been a back door around the same denial. No Java files were written. Waiting on Matt.
+- **Resolved:** Matt ran `mvn -q verify spotless:check -Dspring-boot.repackage.skip=true` in his own terminal. Repackaging had to be skipped because there was no main class yet. That filled the project-local cache (132 MB), and sandboxed `mvn test` has worked offline since. Pattern from here: dependency downloads happen in Matt's terminal; code runs in the sandbox.
+
+## 2026-10-10: post-edit hook, first live run
+
+- **TDD through the hook.** Writing `StripeConfigTest` and `MigrationsIT` first made the PostToolUse hook report the compile failure ("cannot find symbol StripeConfig") straight back to Claude: the red step, delivered automatically. Each new main class shrank the error list, and after `StripeConfig` the hook was silent (green). Then `mvn test` showed 5/5, and `spotless:check` was clean.
+- **The Spotless watch item happened, harmlessly.** The hook reformatted `MigrationsIT.java` and `StripeConfig.java` after they were written. Claude Code noticed ("PostToolUse hook modified … after your edit") and the next edit didn't fail. Still no fix needed.
+- **Fake keys in tests are assembled at runtime** (`"sk_" + "live_" + suffix`), so the source never contains a key-shaped literal. That keeps it clean for secret scanners (GitHub push protection), for the `Bash(*sk_live_*)` deny rule and for `guard-bash.sh`, for example when grepping the file.
+- **`StripeProperties` overrides `toString()`.** A Java record prints every component by default, which would put the key into any log line that prints the config object. A test checks this.
+
+## 2026-10-10: F1a review (payments-reviewer + /code-review), including the hooks' missed round
+
+**The big one: the post-edit hook was a sandbox bypass (payments-reviewer, blocking).** Hooks run *outside* the sandbox, so `mvn test` in the PostToolUse hook ran Claude-written test code with Matt's full privileges after every edit, with no prompt, and fed the output back to Claude. Test code could read `.env` and print it base64-encoded, which the key-shape redaction wouldn't catch. My earlier "the project-local `.m2` adds no new exposure" reasoning missed this automatic unsandboxed path. **Matt's decision:** the hook now only formats and compiles (`spotless:apply`, `test-compile`). Maven's own plugins run, but no project code does. Claude runs `mvn test` inside the sandbox. A new hook test records the Maven goals the hook calls and fails if `test`, `verify`, `package` or `spring-boot:run` appear. It failed first (it caught `-q test`), then passed: 100/100. Lesson: "where does this code run, and with whose privileges?" applies to the guardrails themselves. A safety hook that executes untrusted code is a hole in the sandbox.
+
+**Also blocking: `docker compose` auto-allowed and unsandboxed.** `docker-compose.yml` is an ordinary editable file, so a compose file that mounts `~/.config/stripe` plus an allow-listed `docker compose up`/`logs` could print the key with no prompt. Fixed: `docker compose` moved from allow to ask, and Matt runs it.
+
+**F1a fixes (tests first; the two webhook-secret tests failed before the fix, then 7/7 passed):**
+- **Webhook secret checked at startup** (raised by both reviewers): it must start with `whsec_`, because an empty secret makes signature checks worthless (anyone can compute an HMAC with an empty key). Both checks run in `StripeConfig`'s constructor.
+- **`StripeConfigTest` isolated from the shell environment.** Every case sets both properties explicitly, because a `STRIPE_SECRET_KEY` exported in Matt's shell would otherwise make "missing key" tests fail falsely. Failures now assert *which* check failed and that the value isn't echoed. The empty-string case (what `${STRIPE_SECRET_KEY:}` produces) is covered.
+- **V1 gained a `set_updated_at()` trigger**, so `updated_at` can't silently stay at the creation time. `MigrationsIT` tests it, along with the `acct_` format check (`''` and `cus_…` are rejected). Done before V1 is committed, because afterwards V1 is immutable.
+- `MigrationsIT` keys are assembled at runtime (`@DynamicPropertySource`), matching the convention. Postgres is bound to `127.0.0.1`. `DB_PASSWORD` has no default, so a missing value fails with a clear error. `mvn verify` now runs `spotless:check`. The duplicate failsafe config and the unused `app.base-url` were removed; `app.base-url` comes back with its consumer in F1b.
+
+**Deferred to F3:** out-of-order `account.updated` events could roll a reseller's status backwards. Plan: F3 re-fetches the account from Stripe on every `account.updated` instead of trusting the snapshot, which is Stripe's own guidance for snapshot events, so no ordering column is needed in V1.
+
+**Deferred hook should-fixes (Matt: "F1a + B2 only"), to do later or list as known gaps in SUMMARY.md:**
+- `cp .env.example .env` *may* get past `guard-bash.sh`: `grep -o` consumes the boundary character between adjacent names. Unverified, and my own guard blocks testing it from the shell. Add a test case first.
+- `rk_live_` (live restricted keys) isn't blocked; only `sk_live_` is.
+- `.env` and migration-name matching is case-sensitive, but APFS usually isn't (`.ENV`, `v1__…sql`).
+- `post-edit-check.sh` exits 0 silently if `jq` fails.
+- Written into CLAUDE.md Limits instead: `export -p`, `declare -p` and `set` dump the environment; heredoc detection can be fooled by multi-line quoted strings.
+
+**Where I disagreed with the reviewer (with evidence):**
+- `Read(!.env.example)` isn't a no-op: the permissions docs document `!` carve-outs within a deny list, and writing `.env.example` worked live.
+- A compound command containing an excluded program isn't run unsandboxed as a whole: the sandbox docs say every command in the call must match an exclusion.
+- The reviewer's git can't be redirected through a tampered `.git/config`, because sandboxed commands can't write `.git/config` (seen live).

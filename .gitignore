@@ -11,3 +11,6 @@ target/
 
 # Personal Claude Code settings (the shared ones are in .claude/settings.json)
 .claude/settings.local.json
+
+# Project-local Maven cache (see .mvn/maven.config)
+.m2/

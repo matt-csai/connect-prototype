@@ -175,6 +175,7 @@ echo "-- post-edit-check.sh (stub mvn; exit code from STUB_MVN_EXIT)"
 stub_bin=$(mktemp -d "$repo/.stub.XXXX")
 cat > "$stub_bin/mvn" <<'STUB'
 #!/usr/bin/env bash
+[[ -n "${STUB_MVN_CALLS:-}" ]] && echo "$*" >> "$STUB_MVN_CALLS"
 [[ -n "${STUB_MVN_SLEEP:-}" ]] && sleep "$STUB_MVN_SLEEP"
 echo "[ERROR] Tests run: 3, Failures: 1 -- OrderServiceTest.rejectsDisabledReseller"
 echo "[ERROR] key in output: sk_test_abc123DEF whsec_xyz789"
@@ -199,7 +200,17 @@ else
 fi
 
 export STUB_MVN_EXIT=0
-expect 0 post-edit-check.sh "$(edit Edit "$java_file")"            "passes when format and tests succeed"
+expect 0 post-edit-check.sh "$(edit Edit "$java_file")"            "passes when format and compile succeed"
+
+# Hooks run outside the sandbox, so the hook must never execute project code: it may format and
+# compile, but not run the test phase (or anything after it, like verify or spring-boot:run).
+calls="$repo/.mvn-calls"
+STUB_MVN_CALLS=$calls CLAUDE_PROJECT_DIR=$repo bash "$hooks_dir/post-edit-check.sh" <<<"$(edit Edit "$java_file")" >/dev/null 2>&1
+if grep -q 'test-compile' "$calls" && ! grep -qwE 'test|verify|install|package|spring-boot:run|exec:java' <(sed 's/test-compile//g' "$calls"); then
+  pass=$((pass + 1)); echo "PASS  runs only format and compile goals, never project code"
+else
+  fail=$((fail + 1)); echo "FAIL  runs only format and compile goals, never project code (calls: $(tr '\n' ';' < "$calls"))"
+fi
 
 # A slow run must be reported as a timeout, not die silently when Claude Code kills the hook.
 start=$SECONDS

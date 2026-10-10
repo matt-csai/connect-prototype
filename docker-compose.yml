@@ -1,0 +1,22 @@
+# Local Postgres for running the app. Tests use Testcontainers instead.
+# Values come from .env (docker compose reads it automatically); see .env.example.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: connect
+      POSTGRES_USER: ${DB_USERNAME:-connect}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    ports:
+      # Bound to localhost only, so the database isn't reachable from the rest of the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d connect"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
