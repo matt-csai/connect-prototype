@@ -3,7 +3,10 @@
 # Blocks edits to secrets files (.env, .env.*; .env.example is fine) and to
 # Flyway migrations that are already committed (applied migrations are immutable).
 # Exit 2 blocks the tool call; stderr is shown to Claude as the reason.
+# Any other failure is turned into exit 2 too: this hook never fails open.
 set -euo pipefail
+
+trap 'rc=$?; if ((rc != 0 && rc != 2)); then echo "BLOCKED by protect-files.sh: internal error (exit $rc), blocking to be safe." >&2; exit 2; fi' EXIT
 
 block() {
   echo "BLOCKED by protect-files.sh: $1" >&2
@@ -16,7 +19,7 @@ path=$(jq -r '.tool_input.file_path // .tool_input.notebook_path // empty' <<<"$
 [[ -n "$path" ]] || block "no file path in the hook input, so the edit is blocked to be safe."
 
 # 1. Secrets files.
-name=$(basename "$path")
+name=${path##*/}
 if [[ "$name" == ".env" || ("$name" == .env.* && "$name" != ".env.example") ]]; then
   block "$path is a secrets file. Keys live only in your local .env, which Claude never reads or writes. Put placeholder values in .env.example instead."
 fi

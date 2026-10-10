@@ -8,6 +8,8 @@
       "Edit(.env)",
       "Edit(.env.*)",
       "Edit(!.env.example)",
+      "Read(~/.config/stripe/**)",
+      "Edit(~/.config/stripe/**)",
       "Bash(git push *)",
       "Bash(rm -rf *)",
       "Bash(rm -fr *)",
@@ -16,7 +18,8 @@
     ],
     "ask": [
       "Bash(git commit *)",
-      "Bash(rm *)"
+      "Bash(rm *)",
+      "Bash(stripe listen *)"
     ],
     "allow": [
       "Bash(mvn test *)",
@@ -37,12 +40,25 @@
       "Bash(docker compose logs *)",
       "Bash(git add *)",
       "Bash(bash .claude/hooks/tests/*)",
-      "Bash(stripe listen --project-name connect-prototype *)",
       "Bash(stripe trigger --project-name connect-prototype *)",
       "Bash(stripe events resend --project-name connect-prototype *)",
       "Bash(stripe logs tail --project-name connect-prototype *)"
     ],
     "disableBypassPermissionsMode": "disable"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": false,
+    "filesystem": {
+      "allowRead": ["./.env.example"]
+    },
+    "credentials": {
+      "envVars": [
+        { "name": "STRIPE_SECRET_KEY", "mode": "deny" },
+        { "name": "STRIPE_WEBHOOK_SECRET", "mode": "deny" }
+      ]
+    },
+    "excludedCommands": ["docker compose *", "stripe *"]
   },
   "hooks": {
     "PreToolUse": [
@@ -61,6 +77,18 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-bash.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/post-edit-check.sh",
+            "timeout": 300
           }
         ]
       }
